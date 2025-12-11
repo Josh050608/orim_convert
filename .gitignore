@@ -1,0 +1,189 @@
+# Bitcoin Core 编译产物
+bitcoin/src/bitcoind
+bitcoin/src/bitcoin-cli
+bitcoin/src/bitcoin-tx
+bitcoin/src/bitcoin-wallet
+bitcoin/src/bitcoin-util
+bitcoin/src/test/test_bitcoin
+bitcoin/src/qt/bitcoin-qt
+bitcoin/src/*.a
+bitcoin/src/*.o
+bitcoin/src/*.lo
+bitcoin/src/*.la
+bitcoin/src/.libs/
+bitcoin/src/.deps/
+bitcoin/src/config/
+bitcoin/src/build-aux/
+bitcoin/Makefile
+bitcoin/src/Makefile
+bitcoin/src/*/Makefile
+bitcoin/src/config.status
+bitcoin/src/config.log
+bitcoin/src/libtool
+bitcoin/src/univalue/
+bitcoin/src/secp256k1/
+bitcoin/autom4te.cache/
+bitcoin/config.cache
+bitcoin/config.status
+bitcoin/config.log
+bitcoin/configure
+
+# 编译临时文件
+*.o
+*.a
+*.so
+*.dylib
+*.lo
+*.la
+.libs/
+.deps/
+*.exe
+*.dll
+
+# Bitcoin 数据目录
+.bitcoin/
+bitcoin_data/
+regtest/
+testnet3/
+signet/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ORIM 运行时文件
+orim_engine/*.log
+orim_engine/*.db
+orim_engine/*.db-journal
+orim_engine/__pycache__/
+
+# Conda 环境
+orim_env/
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.cproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# 日志文件
+*.log
+logs/
+debug.log
+
+# 数据库文件
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+tmp/
+temp/
+
+# 测试产物
+test_results/
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# 构建产物
+build/
+dist/
+out/
+target/
+
+# 压缩文件
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Core dumps
+core
+core.*
+
+# 密钥和敏感信息
+*.key
+*.pem
+*.p12
+secrets/
+.env
+.env.local
+
+# Valgrind
+*.memcheck
+*.callgrind
+*.cachegrind
+
+# Bear (compile_commands.json 生成器)
+compile_commands.json
+
+# 文档临时文件
+*.aux
+*.out
+*.toc
