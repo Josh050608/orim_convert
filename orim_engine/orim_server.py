@@ -406,44 +406,76 @@ class ORIMServer:
         # Try to reconstruct messages
         self._try_decode_messages()
     
+    ## difference
+    
     def _try_decode_messages(self):
-        """Attempt to decode received bits into messages"""
+        """
+        [残余回收解码器] - 修复错位的关键
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Get all undecoded bits in order
-        cursor.execute('''
-            SELECT bits FROM incoming_messages
-            ORDER BY received_at
-        ''')
+        # 1. 提取所有比特流
+        cursor.execute('SELECT id, bits FROM incoming_messages ORDER BY received_at')
+        rows = cursor.fetchall()
         
-        all_bits = ''.join(row[0] for row in cursor.fetchall())
+        if not rows:
+            conn.close()
+            return
+
+        # 合并成一个大流
+        full_stream = ""
+        for _, r_bits in rows:
+            full_stream += r_bits
         
-        # Try to decode as ASCII (8 bits per character)
-        if len(all_bits) >= 8:
-            byte_count = len(all_bits) // 8
-            message_bytes = []
+        decoded_chars = []
+        ptr = 0
+        total_len = len(full_stream)
+        
+        # 2. 扫描解码
+        while ptr + 8 <= total_len:
+            byte_bits = full_stream[ptr : ptr+8]
             
-            for i in range(byte_count):
-                byte_bits = all_bits[i*8:(i+1)*8]
-                try:
-                    byte_val = int(byte_bits, 2)
-                    if 32 <= byte_val <= 126:  # Printable ASCII
-                        message_bytes.append(chr(byte_val))
-                    else:
-                        break
-                except:
-                    break
+            # 过滤空闲信号
+            if byte_bits == "00000000":
+                ptr += 8
+                continue
             
-            if message_bytes:
-                decoded_message = ''.join(message_bytes)
-                cursor.execute('''
-                    INSERT INTO decoded_messages (message)
-                    VALUES (?)
-                ''', (decoded_message,))
-                conn.commit()
-                logger.info(f"Decoded message: {decoded_message}")
+            try:
+                byte_val = int(byte_bits, 2)
+                # 可打印字符 (ASCII 32-126)
+                if 32 <= byte_val <= 126:
+                    decoded_chars.append(chr(byte_val))
+                    ptr += 8 # 成功消费8位
+                else:
+                    # 遇到乱码，这可能是错位了，也可能是还没传输完
+                    # 为了演示稳定性，我们假设这是无效数据，尝试跳过8位
+                    # (更高级的实现可以尝试 ptr+=1 进行滑动窗口纠错，但这在演示中太慢)
+                    ptr += 8 
+            except:
+                ptr += 8
+
+        # 3. 存入结果
+        if decoded_chars:
+            new_message = "".join(decoded_chars)
+            if len(new_message.strip()) > 0:
+                cursor.execute('INSERT INTO decoded_messages (message) VALUES (?)', (new_message,))
+                logger.info(f"Decoded: {new_message}")
+
+        # 4. [关键步骤] 残余回收 (Residue Recycling)
+        # 计算剩下的残余比特（不足8位的，或者多余的）
+        residue = full_stream[ptr:]
         
+        # 清空当前表
+        cursor.execute('DELETE FROM incoming_messages')
+        
+        # 如果有残余，把它塞回去作为下一批数据的开头！
+        if len(residue) > 0:
+            # 使用 ID -1 标记这是系统回收的残余数据
+            cursor.execute('INSERT INTO incoming_messages (peer_id, bits) VALUES (-1, ?)', (residue,))
+            # logger.info(f"Recycled {len(residue)} bits back to buffer")
+        
+        conn.commit()
         conn.close()
     
     def handle_send_request(self, request: Dict) -> Dict:
