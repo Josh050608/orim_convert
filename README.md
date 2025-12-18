@@ -1,4 +1,39 @@
-# ORIM 快速开始指南
+# 🚀 ORIM 隐蔽文件传输系统
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9+-green.svg)](https://python.org)
+[![Bitcoin](https://img.shields.io/badge/bitcoin-modified-orange.svg)](bitcoin/)
+
+基于区块链的端到端加密文件传输系统，使用 IPFS + Bitcoin 隐蔽信道实现完全隐蔽的文件传输。
+
+---
+
+## ⚡ 快速开始
+
+### 🧪 快速测试（推荐首次使用）
+```bash
+./test_e2e.py
+```
+
+### 🎨 启动 GUI 演示
+```bash
+./demo_gui.sh
+```
+
+### 🌐 启动完整系统
+```bash
+./start_demo.sh
+```
+
+---
+
+## 📚 详细文档
+
+- **GUI 使用指南**: [docs/GUI_USER_GUIDE.md](docs/GUI_USER_GUIDE.md)
+- **集成完成报告**: [docs/GUI_INTEGRATION_COMPLETE.md](docs/GUI_INTEGRATION_COMPLETE.md)
+- **技术实现文档**: [docs/ORIM_README.md](docs/ORIM_README.md)
+
+---
 
 ## 1. 安装系统依赖
 

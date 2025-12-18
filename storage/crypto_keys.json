@@ -1,0 +1,56 @@
+{
+  "QmaRctHMH4NbmWNji6k132rKsGfRbKLRppbyo6SsGq9hnC": {
+    "key": "VQEcbgj96XtzNlmHr-KhlJdMQI4JIrhg7dI7Qc9g2D8=",
+    "alias": "test_secret",
+    "file_name": "test_orim_file.txt",
+    "original_size": 93
+  },
+  "QmakbiR1wLtXXA8J9fDbAu4m6dtY9JVSLCC4WShKojfq4o": {
+    "key": "u_i9KcCxM4qSJhQGWTbFymzZhiuSZmZ4RU_n5hle_nU=",
+    "alias": "test_document.txt",
+    "file_name": "test_document.txt",
+    "original_size": 148
+  },
+  "QmWnyPX57BGEW3wPu56F1atwgJGSSSYNoWSHYcPgRxNvne": {
+    "key": "ssUzqEIkPpkcPh-H05TPgDVC81r-xKeOcqk4def7C-Q=",
+    "alias": "test_document.txt",
+    "file_name": "test_document.txt",
+    "original_size": 148
+  },
+  "QmafLXpiyrPuX9Q519PYq34Z58SHoKu5kQ5UBA5jqdWz76": {
+    "key": "9y4ThxcImCV1bPZubni6BqJaU3iT8pjjUr4IT15CbUc=",
+    "alias": "test_document.txt",
+    "file_name": "test_document.txt",
+    "original_size": 148
+  },
+  "QmW9jJVgkDFLgph6n8MDqyaaK2BgKPD1ae19zzgphQJpkK": {
+    "key": "FvB9S1pdxmZ4iuiWQRuXNEQ6sI0BKxtCcFa8_93LMrU=",
+    "alias": "alice_secret_message.txt",
+    "file_name": "alice_secret_message.txt",
+    "original_size": 791
+  },
+  "QmTDHD6uYm35PxuPfkgExBnZcpxHGy7hNPCV2QXQoAe164": {
+    "key": "UzJ5xNuGd9E94_TJhRWLTu_2W4hbRMdkmKaLy8OQMKE=",
+    "alias": "Fseme_tUEoLiPE_CbcxvYsdwL1TJ.webp",
+    "file_name": "Fseme_tUEoLiPE_CbcxvYsdwL1TJ.webp",
+    "original_size": 24882
+  },
+  "QmNWqRkFNQB4D1tBysS997VySrohynH95homSZrxHrNh3E": {
+    "key": "cqz3epi0AUI7iclasahT4ZDLtKbBJggcpdYOiURivto=",
+    "alias": "alice_secret_message.txt",
+    "file_name": "alice_secret_message.txt",
+    "original_size": 791
+  },
+  "QmYPuurQSWVhBSoNyBNxYXV28cLJW2r7GTdicQ3jQ9Q8sH": {
+    "key": "_eivxQrzVEkCH8iuhUZEB90pwAfNyOPRMcQdxgS2ep4=",
+    "alias": "Fseme_tUEoLiPE_CbcxvYsdwL1TJ.webp",
+    "file_name": "Fseme_tUEoLiPE_CbcxvYsdwL1TJ.webp",
+    "original_size": 24882
+  },
+  "Qmai86WNardMbJL5e77PTeLNkC9eDcBNa2wd2TKDdEdzte": {
+    "key": "z0tTIopwcROeVNAwkVbPyCnHs19Uaednhq403a4qRws=",
+    "alias": "d836ca46-366a-4910-a2da-2e740ff0dacb.png",
+    "file_name": "d836ca46-366a-4910-a2da-2e740ff0dacb.png",
+    "original_size": 1061263
+  }
+}

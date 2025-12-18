@@ -223,6 +223,9 @@ class IPFSCryptoService:
         
         # 获取解密密钥
         if encryption_key is None:
+            # 🔥 重新加载密钥（防止在同一进程中 Alice 添加了新密钥但 Bob 的实例还是旧的）
+            self.keys = self._load_keys()
+            
             if cid not in self.keys:
                 raise ValueError(f"No encryption key found for CID: {cid}")
             encryption_key = self.keys[cid]['key'].encode('utf-8')
