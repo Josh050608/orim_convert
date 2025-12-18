@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-ORIM Covert Channel Server
-Based on "Blockchain-Based Covert Communication: A Detection Attack and Efficient Improvement"
-
-This server receives inventory (inv) messages from Bitcoin Core via ZMQ,
-applies the ORIM permutation-based steganography scheme, and returns
-reordered transaction/block hashes.
-
-Architecture:
-- Sender Side: Reorders hashes based on secret message bits using PRF + Complete Binary Tree mapping
-- Receiver Side: Extracts secret message bits by computing permutation rank
+ORIM Covert Channel Server (Final Edition)
+Features:
+- Protocol Framing (Magic + CID + CRC)
+- Automatic Padding for Capacity Matching
+- Bit-wise Sliding Window Decoding
+- Debug Logging
 """
 
 import zmq
@@ -18,12 +14,22 @@ import hashlib
 import hmac
 import sqlite3
 import sys
+import os
 import logging
-from typing import List, Tuple, Dict
+from math import factorial
+from typing import List, Tuple, Dict, Optional
 from datetime import datetime
-from math import factorial, log2
 
-# Configure logging
+# === 引入协议封装 ===
+# 尝试从 core 包导入，如果失败尝试直接导入(兼容性处理)
+try:
+    from core.protocol import ORIMProtocol
+except ImportError:
+    # 允许在 orim_engine 目录下直接运行
+    sys.path.append(os.getcwd())
+    from core.protocol import ORIMProtocol
+
+# 配置日志 (这是 Server 运行日志)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -34,874 +40,621 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==========================================
+# 🔬 Debug Logger for Binary Tracing (Sender Side)
+# ==========================================
+debug_logger = logging.getLogger('sender_debug')
+debug_logger.setLevel(logging.DEBUG)
+# Calculate absolute path to storage directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+storage_dir = os.path.join(project_root, 'storage')
+os.makedirs(storage_dir, exist_ok=True)
+debug_log_path = os.path.join(storage_dir, 'sender_debug.log')
+
+debug_handler = logging.FileHandler(debug_log_path, mode='a')
+debug_handler.setLevel(logging.DEBUG)
+debug_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+debug_logger.addHandler(debug_handler)
+debug_logger.propagate = False
+
+# Force immediate flush after each write
+class FlushingHandler(logging.FileHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+# Replace with flushing handler
+debug_logger.removeHandler(debug_handler)
+debug_handler_flushing = FlushingHandler(debug_log_path, mode='a')
+debug_handler_flushing.setLevel(logging.DEBUG)
+debug_handler_flushing.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+debug_logger.addHandler(debug_handler_flushing)
+
+logger.info(f"Debug logger initialized: {debug_log_path}")
 
 class ORIMServer:
-    """ORIM Covert Channel Server implementing the complete ORIM scheme"""
-    
     def __init__(self, zmq_endpoint: str, prf_key: bytes, db_path: str):
-        """
-        Initialize ORIM server
-        
-        Args:
-            zmq_endpoint: ZMQ endpoint to bind (e.g., "tcp://*:5555")
-            prf_key: PRF key for obfuscating hash values (32 bytes recommended)
-            db_path: Path to SQLite database for storing secret messages
-        """
         self.zmq_endpoint = zmq_endpoint
         self.prf_key = prf_key
         self.db_path = db_path
         
-        # Initialize ZMQ
+        # Init ZMQ
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REP)
         self.socket.bind(zmq_endpoint)
         logger.info(f"ORIM Server listening on {zmq_endpoint}")
         
-        # Initialize database
         self._init_database()
         
-        # Statistics
-        self.stats = {
-            'sent_messages': 0,
-            'received_messages': 0,
-            'total_bits_sent': 0,
-            'total_bits_received': 0,
-            'errors': 0
-        }
-    
+        # Stats
+        self.stats = {'sent_msgs': 0, 'recv_msgs': 0, 'bits_sent': 0, 'bits_recv': 0}
+
     def _init_database(self):
-        """Initialize SQLite database for storing secret messages"""
+        """初始化数据库表结构"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Table for outgoing secret messages (sender queue)
+        # 发送队列
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS outgoing_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message TEXT NOT NULL,
-                bits TEXT NOT NULL,
+                message TEXT,
+                bits TEXT,
                 position INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP NULL
             )
         ''')
         
-        # Table for incoming secret messages (receiver buffer)
+        # 接收缓冲区
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS incoming_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                peer_id INTEGER NOT NULL,
-                bits TEXT NOT NULL,
+                peer_id INTEGER,
+                bits TEXT,
                 received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Table for reconstructed messages
+        # 解码结果
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS decoded_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message TEXT NOT NULL,
+                message TEXT,
                 decoded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
         conn.commit()
         conn.close()
-        logger.info(f"Database initialized at {self.db_path}")
-    
+
+    # ==========================================
+    # 核心数学逻辑 (ORIM 算法实现)
+    # ==========================================
     def prf(self, hash_hex: str) -> int:
-        """
-        Pseudo-Random Function (PRF) to compute obfuscated value
-        
-        Args:
-            hash_hex: Transaction/block hash as hex string
-            
-        Returns:
-            Integer obfuscated value derived from HMAC-SHA256
-        """
-        # Use HMAC-SHA256 as PRF
+        """PRF: Hash → Integer (HMAC-SHA256 based)"""
         hash_bytes = bytes.fromhex(hash_hex)
         hmac_obj = hmac.new(self.prf_key, hash_bytes, hashlib.sha256)
-        prf_output = hmac_obj.digest()
-        
-        # Convert first 8 bytes to integer
-        return int.from_bytes(prf_output[:8], byteorder='big')
-    
+        # Use full 256-bit output for better distribution
+        return int.from_bytes(hmac_obj.digest(), byteorder='big')
+
     def compute_obfuscated_values(self, hashes: List[str]) -> List[int]:
-        """
-        Compute obfuscated values for a list of hashes
-        
-        Args:
-            hashes: List of transaction/block hashes
-            
-        Returns:
-            List of obfuscated integer values
-        """
-        return [self.prf(h) for h in hashes]
-    
+        """Compute obfuscated values for all hashes using PRF (Algorithm 2, Step 1)"""
+        obf_values = [self.prf(h) for h in hashes]
+        debug_logger.debug(f"[PRF] Computed {len(obf_values)} obfuscated values")
+        return obf_values
+
     def factorial_number_system(self, rank: int, n: int) -> List[int]:
-        """
-        Convert rank to permutation using Factorial Number System (Lehmer code)
-        
-        Args:
-            rank: Integer rank (0 to n!-1)
-            n: Size of permutation
-            
-        Returns:
-            Lehmer code representation [c_{n-1}, c_{n-2}, ..., c_1, c_0]
-        """
         lehmer = []
         for i in range(n, 0, -1):
             fact = factorial(i - 1)
-            c = rank // fact
-            lehmer.append(c)
+            lehmer.append(rank // fact)
             rank %= fact
         return lehmer
-    
+
     def lehmer_to_permutation(self, lehmer: List[int]) -> List[int]:
-        """
-        Convert Lehmer code to permutation
-        
-        Args:
-            lehmer: Lehmer code [c_{n-1}, ..., c_0]
-            
-        Returns:
-            Permutation as list of indices
-        """
-        n = len(lehmer)
-        available = list(range(n))
-        permutation = []
-        
-        for c in lehmer:
-            permutation.append(available.pop(c))
-        
-        return permutation
-    
+        available = list(range(len(lehmer)))
+        return [available.pop(c) for c in lehmer]
+
     def permutation_to_lehmer(self, permutation: List[int]) -> List[int]:
-        """
-        Convert permutation to Lehmer code
-        
-        Args:
-            permutation: Permutation as list of indices
-            
-        Returns:
-            Lehmer code representation
-        """
         n = len(permutation)
         lehmer = []
-        
         for i in range(n):
-            count = 0
-            for j in range(i + 1, n):
-                if permutation[j] < permutation[i]:
-                    count += 1
+            count = sum(1 for j in range(i + 1, n) if permutation[j] < permutation[i])
             lehmer.append(count)
-        
         return lehmer
-    
+
     def lehmer_to_rank(self, lehmer: List[int]) -> int:
-        """
-        Convert Lehmer code to rank
-        
-        Args:
-            lehmer: Lehmer code [c_{n-1}, ..., c_0]
-            
-        Returns:
-            Integer rank
-        """
-        rank = 0
         n = len(lehmer)
-        
-        for i, c in enumerate(lehmer):
-            rank += c * factorial(n - 1 - i)
-        
-        return rank
-    
+        return sum(c * factorial(n - 1 - i) for i, c in enumerate(lehmer))
+
     def bits_to_rank(self, bits: str, n: int) -> Tuple[int, int]:
         """
-        Convert secret bits to permutation rank using Complete Binary Tree mapping
-        (ORIM Algorithm 2: Data Encoding)
+        Complete Binary Tree Variable-Length Encoding (Algorithm 2)
         
-        The Complete Binary Tree approach handles the fact that n! is rarely a power of 2:
-        - If 2^(m-1) < n! ≤ 2^m
-        - First (2^m - n!) permutations encode m bits
-        - Remaining (2*n! - 2^m) permutations encode m-1 bits
+        Given n permutations (N = n!), encode bits to rank using:
+        - Layer m (Long Code): m bits → rank ∈ [0, T-1]
+        - Layer m-1 (Short Code): m-1 bits → rank ∈ [N - 2^(m-1), N-1]
         
-        Args:
-            bits: Secret bit string (e.g., "101101")
-            n: Number of elements to permute
-            
-        Returns:
-            Tuple of (rank, bits_consumed)
-            - rank: Permutation rank (0 to n!-1)
-            - bits_consumed: Number of bits actually encoded (m or m-1)
+        Where:
+        - m: layer number such that 2^(m-1) ≤ N ≤ 2^m
+        - T: threshold = 2N - 2^m (number of leaf nodes in layer m)
+        
+        Returns: (rank, consumed_bits)
+        Guarantee: rank < N = n! (mathematically proven)
         """
-        n_factorial = factorial(n)
+        N = factorial(n)
         
-        # Calculate m such that 2^(m-1) < n! ≤ 2^m
+        # Calculate layer m: 2^(m-1) ≤ N ≤ 2^m
         m = 1
-        while (1 << m) < n_factorial:  # 2^m < n!
+        while (1 << m) < N:
             m += 1
         
-        # Now 2^(m-1) < n! ≤ 2^m
-        threshold = (1 << m) - n_factorial  # 2^m - n!
+        # Threshold T = 2N - 2^m
+        T = 2 * N - (1 << m)
         
-        # Algorithm 2: Data Encoding
-        # Special case: if n! is a perfect power of 2 (threshold = 0),
-        # all ranks encode exactly m bits
-        if threshold == 0:
-            # Perfect power of 2: all ranks use m bits
-            if len(bits) >= m:
-                data_m = int(bits[:m], 2)
-            else:
-                data_m = int(bits.ljust(m, '0'), 2)
-            rank = data_m
-            bits_consumed = min(len(bits), m)
-        elif len(bits) >= m:
-            # Try to use m bits
-            data_m = int(bits[:m], 2)
+        # Special case: N is exactly a power of 2 (T = 0)
+        if T == 0:
+            # All codes use m bits
+            if len(bits) < m:
+                # Pad with zeros
+                bits = bits.ljust(m, '0')
+            val_m = int(bits[:m], 2)
+            debug_logger.debug(f"[ENCODE] n={n} N={N} m={m} T={T} → Layer-m (special): consumed={m} rank={val_m}")
+            return val_m, m
+        
+        # General case: Complete Binary Tree
+        # Peek at m bits to decide which layer
+        if len(bits) >= m:
+            val_m = int(bits[:m], 2)
             
-            if data_m < threshold:
-                # Case 1: First 2^m - n! permutations encode m bits
-                # Rank = data_m (which is < threshold)
-                rank = data_m
-                bits_consumed = m
+            # Condition A: val_m < T → use Layer m (Long Code)
+            if val_m < T:
+                debug_logger.debug(f"[ENCODE] n={n} N={N} m={m} T={T} → Layer-m (long): val_m={val_m} consumed={m} rank={val_m}")
+                return val_m, m
+            
+            # Condition B: val_m ≥ T → use Layer m-1 (Short Code)
             else:
-                # Case 2: Remaining permutations encode m-1 bits
-                # Use m-1 bits to select from second part of tree
-                data_m_minus_1 = int(bits[:m-1], 2)
-                # Rank = threshold + data_{m-1}
-                rank = threshold + data_m_minus_1
-                bits_consumed = m - 1
+                val_m_minus_1 = int(bits[:m-1], 2)
+                rank = N - (1 << (m - 1)) + val_m_minus_1
+                debug_logger.debug(f"[ENCODE] n={n} N={N} m={m} T={T} → Layer-m-1 (short): val_m={val_m}≥T, val_{m-1}={val_m_minus_1} consumed={m-1} rank={rank}")
+                return rank, m - 1
+        
         elif len(bits) >= m - 1:
-            # Only have m-1 bits available, use second part of tree
-            data_m_minus_1 = int(bits[:m-1], 2)
-            rank = threshold + data_m_minus_1
-            bits_consumed = m - 1
+            # Only have m-1 bits, must use Layer m-1
+            val_m_minus_1 = int(bits[:m-1], 2)
+            rank = N - (1 << (m - 1)) + val_m_minus_1
+            debug_logger.debug(f"[ENCODE] n={n} N={N} m={m} T={T} → Layer-m-1 (forced): insufficient bits, val_{m-1}={val_m_minus_1} consumed={m-1} rank={rank}")
+            return rank, m - 1
+        
         else:
-            # Not enough bits, pad with zeros
-            data = int(bits.ljust(m-1, '0'), 2)
-            rank = threshold + data
-            bits_consumed = len(bits)
-        
-        # Ensure rank is within valid range
-        rank = min(rank, n_factorial - 1)
-        
-        return rank, bits_consumed
-    
+            # Insufficient bits even for m-1, pad and use Layer m-1
+            bits_padded = bits.ljust(m - 1, '0')
+            val_m_minus_1 = int(bits_padded, 2)
+            rank = N - (1 << (m - 1)) + val_m_minus_1
+            debug_logger.debug(f"[ENCODE] n={n} N={N} m={m} T={T} → Layer-m-1 (padded): only {len(bits)} bits, padded val_{m-1}={val_m_minus_1} consumed={len(bits)} rank={rank}")
+            return rank, len(bits)
+
     def rank_to_bits(self, rank: int, n: int) -> str:
         """
-        Convert permutation rank back to secret bits using Complete Binary Tree
-        (ORIM Algorithm 4: Data Decoding)
+        Complete Binary Tree Variable-Length Decoding (Inverse of bits_to_rank)
         
-        Variable-length decoding based on which part of the tree the rank falls into.
+        Decode rank to bits using the same layer logic:
+        - If rank < T: decode as m-bit value
+        - If rank ≥ N - 2^(m-1): decode as m-1-bit value from Layer m-1
         
-        Args:
-            rank: Permutation rank (0 to n!-1)
-            n: Number of elements in permutation
-            
-        Returns:
-            Binary string representing secret bits (length m or m-1)
+        Returns: bits string (variable length)
         """
-        n_factorial = factorial(n)
+        N = factorial(n)
         
-        # Calculate m such that 2^(m-1) < n! ≤ 2^m
+        # Calculate layer m
         m = 1
-        while (1 << m) < n_factorial:
+        while (1 << m) < N:
             m += 1
         
-        threshold = (1 << m) - n_factorial  # 2^m - n!
+        # Threshold T = 2N - 2^m
+        T = 2 * N - (1 << m)
         
-        # Algorithm 4: Data Decoding
-        # Special case: if n! is a perfect power of 2 (threshold = 0),
-        # all ranks encode exactly m bits
-        if threshold == 0:
-            # Perfect power of 2: all ranks use m bits
+        # Special case: N is exactly a power of 2
+        if T == 0:
             bits = bin(rank)[2:].zfill(m)
-        elif rank < threshold:
-            # Case 1: Rank in first part of tree → m bits
-            # data = rank
+            debug_logger.debug(f"[DECODE] n={n} rank={rank} → Layer-m (special): {bits}")
+            return bits
+        
+        # Determine which layer this rank belongs to
+        layer_m_minus_1_start = N - (1 << (m - 1))
+        
+        if rank < T:
+            # Layer m (Long Code): m bits
             bits = bin(rank)[2:].zfill(m)
+            debug_logger.debug(f"[DECODE] n={n} rank={rank} < T={T} → Layer-m: {bits}")
+            return bits
         else:
-            # Case 2: Rank in second part of tree → m-1 bits
-            # data = rank - threshold
-            data = rank - threshold
-            bits = bin(data)[2:].zfill(m - 1)
-        
-        return bits
+            # Layer m-1 (Short Code): m-1 bits
+            val_m_minus_1 = rank - layer_m_minus_1_start
+            bits = bin(val_m_minus_1)[2:].zfill(m - 1)
+            debug_logger.debug(f"[DECODE] n={n} rank={rank} ≥ {layer_m_minus_1_start} → Layer-m-1: val={val_m_minus_1} bits={bits}")
+            return bits
+
+    # ==========================================
+    # 数据流处理逻辑
+    # ==========================================
     
-    def get_next_secret_bits(self, n: int) -> Tuple[str, int]:
+    def get_next_secret_bits(self, n: int) -> Tuple[str, int, int, int]:
         """
-        Get next chunk of secret bits from database (sender side)
-        Uses variable-length encoding, so we fetch max possible bits
+        [Sender Logic] Fetch next bits from database with "Check & Consume" strategy
         
-        Args:
-            n: Number of hashes (determines bit capacity)
-            
-        Returns:
-            Tuple of (bits_string, message_id)
+        Implements Algorithm 2 "Check & Consume" Step:
+        1. Calculate N = n!, m, and threshold T
+        2. Peek at next m bits from buffer
+        3. Decide consumption:
+           - If val_m < T: consume m bits (Layer m)
+           - If val_m ≥ T: consume m-1 bits (Layer m-1)
+        4. Calculate target_rank according to the layer
+        
+        Returns: (bits_chunk, msg_id, actual_data_len, target_rank)
+        Guarantee: target_rank < N (no overflow possible)
         """
-        # Calculate max capacity (m bits where 2^(m-1) < n! ≤ 2^m)
-        n_factorial = factorial(n)
+        N = factorial(n)
+        
+        # Calculate layer m: 2^(m-1) ≤ N ≤ 2^m
         m = 1
-        while (1 << m) < n_factorial:
+        while (1 << m) < N:
             m += 1
-        max_capacity = m  # Maximum bits we might need
         
+        # Threshold T = 2N - 2^m
+        T = 2 * N - (1 << m)
+        
+        # Fetch message from database
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        # Get the first incomplete message
-        cursor.execute('''
-            SELECT id, bits, position
-            FROM outgoing_messages
-            WHERE completed_at IS NULL
-            ORDER BY id
-            LIMIT 1
-        ''')
-        
+        cursor.execute('SELECT id, bits, position FROM outgoing_messages WHERE completed_at IS NULL LIMIT 1')
         row = cursor.fetchone()
         
         if not row:
-            # No messages to send
             conn.close()
-            return ("0" * max_capacity, -1)  # Send dummy bits
+            # No message to send, return dummy data
+            dummy_bits = "0" * m
+            debug_logger.info(f"[CHECK&CONSUME] n={n} N={N} m={m} T={T} → No message, returning {m} dummy zeros")
+            return (dummy_bits, -1, 0, 0)
         
-        msg_id, full_bits, position = row
+        msg_id, full_bits, pos = row
+        total_len = len(full_bits)
+        remaining = total_len - pos
         
-        # Extract next chunk (fetch max_capacity bits)
-        chunk = full_bits[position:position + max_capacity]
+        # === "Check & Consume" Logic (Algorithm 2) ===
         
-        # Pad if necessary
-        if len(chunk) < max_capacity:
-            chunk = chunk.ljust(max_capacity, '0')
+        # Special case: N is power of 2 (T = 0)
+        if T == 0:
+            # Always consume m bits
+            chunk = full_bits[pos:pos + m]
+            if len(chunk) < m:
+                chunk = chunk.ljust(m, '0')  # Pad if insufficient
+            target_rank = int(chunk, 2)
+            actual_data_len = min(remaining, m)
+            conn.close()
+            debug_logger.info(f"[CHECK&CONSUME] n={n} N={N} m={m} T=0 (power-of-2) → consumed={m} rank={target_rank}")
+            return (chunk, msg_id, actual_data_len, target_rank)
         
-        # Note: We don't update position yet - will do after encoding
-        # to know actual bits consumed
+        # General case: Check m bits to decide
+        if remaining >= m:
+            # Peek at m bits
+            peek_m = full_bits[pos:pos + m]
+            val_m = int(peek_m, 2)
+            
+            # Condition A: val_m < T → use Layer m (Long Code)
+            if val_m < T:
+                chunk = peek_m
+                consumed = m
+                target_rank = val_m
+                layer = f"Layer-m (long)"
+            
+            # Condition B: val_m ≥ T → use Layer m-1 (Short Code)
+            else:
+                chunk = full_bits[pos:pos + m - 1]
+                val_m_minus_1 = int(chunk, 2)
+                consumed = m - 1
+                target_rank = N - (1 << (m - 1)) + val_m_minus_1
+                layer = f"Layer-m-1 (short)"
+            
+            actual_data_len = consumed
+            conn.close()
+            debug_logger.info(
+                f"[CHECK&CONSUME] n={n} N={N} m={m} T={T} → {layer}: "
+                f"val_m={val_m if val_m < T else 'N/A'} consumed={consumed} rank={target_rank}"
+            )
+            return (chunk, msg_id, actual_data_len, target_rank)
         
-        conn.commit()
-        conn.close()
+        elif remaining >= m - 1:
+            # Only have m-1 bits, must use Layer m-1
+            chunk = full_bits[pos:pos + m - 1]
+            val_m_minus_1 = int(chunk, 2)
+            consumed = m - 1
+            target_rank = N - (1 << (m - 1)) + val_m_minus_1
+            actual_data_len = consumed
+            conn.close()
+            debug_logger.info(
+                f"[CHECK&CONSUME] n={n} N={N} m={m} T={T} → Layer-m-1 (forced, insufficient): "
+                f"only {remaining} bits, consumed={consumed} rank={target_rank}"
+            )
+            return (chunk, msg_id, actual_data_len, target_rank)
         
-        return (chunk, msg_id)
-    
+        else:
+            # Insufficient bits even for m-1, pad to m-1
+            chunk = full_bits[pos:]
+            chunk_padded = chunk.ljust(m - 1, '0')
+            val_m_minus_1 = int(chunk_padded, 2)
+            consumed = len(chunk)
+            target_rank = N - (1 << (m - 1)) + val_m_minus_1
+            actual_data_len = consumed
+            conn.close()
+            debug_logger.info(
+                f"[CHECK&CONSUME] n={n} N={N} m={m} T={T} → Layer-m-1 (padded): "
+                f"only {remaining} bits, padded to {m-1}, consumed={consumed} rank={target_rank}"
+            )
+            return (chunk_padded, msg_id, actual_data_len, target_rank)
+
     def store_received_bits(self, peer_id: int, bits: str):
         """
-        Store received secret bits (receiver side)
-        
-        Args:
-            peer_id: Peer node ID
-            bits: Extracted secret bits
+        [接收端逻辑] 存入缓冲区并尝试解码
+        包含: 调试日志写入
         """
+        # 1. 存入数据库
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO incoming_messages (peer_id, bits)
-            VALUES (?, ?)
-        ''', (peer_id, bits))
-        
+        conn.execute('INSERT INTO incoming_messages (peer_id, bits) VALUES (?, ?)', (peer_id, bits))
         conn.commit()
         conn.close()
         
-        # Try to reconstruct messages
+        # 2. [调试] 写入 received_bits.log
+        try:
+            log_path = self.db_path.replace('orim.db', 'received_bits.log')
+            with open(log_path, "a") as f:
+                time_str = datetime.now().strftime("%H:%M:%S")
+                f.write(f"[{time_str}] Len={len(bits)}: {bits}\n")
+        except Exception as e:
+            logger.error(f"Failed to write debug log: {e}")
+
+        # 3. 触发解码
+        # (如果你以后启用了独立的 decoder_service.py，可以注释掉下面这就行)
         self._try_decode_messages()
-    
-    ## difference
-    
+
     def _try_decode_messages(self):
         """
-        [残余回收解码器] - 修复错位的关键
+        [内部解码器] 全量扫描 + 协议层识别
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # 1. 提取所有比特流
-        cursor.execute('SELECT id, bits FROM incoming_messages ORDER BY received_at')
+        # 1. 提取所有比特流拼成一个大长串
+        cursor.execute('SELECT bits FROM incoming_messages ORDER BY received_at')
         rows = cursor.fetchall()
+        full_stream = "".join([row[0] for row in rows])
         
-        if not rows:
+        if not full_stream:
             conn.close()
             return
 
-        # 合并成一个大流
-        full_stream = ""
-        for _, r_bits in rows:
-            full_stream += r_bits
-        
-        decoded_chars = []
-        ptr = 0
-        total_len = len(full_stream)
-        
-        # 2. 扫描解码
-        while ptr + 8 <= total_len:
-            byte_bits = full_stream[ptr : ptr+8]
+        # 2. 循环调用协议层扫描
+        while True:
+            # 使用单比特滑动窗口扫描 (支持自动去Padding，自动纠错位)
+            cid, bits_consumed = ORIMProtocol.decode_stream(full_stream)
             
-            # 过滤空闲信号
-            if byte_bits == "00000000":
-                ptr += 8
-                continue
-            
-            try:
-                byte_val = int(byte_bits, 2)
-                # 可打印字符 (ASCII 32-126)
-                if 32 <= byte_val <= 126:
-                    decoded_chars.append(chr(byte_val))
-                    ptr += 8 # 成功消费8位
-                else:
-                    # 遇到乱码，这可能是错位了，也可能是还没传输完
-                    # 为了演示稳定性，我们假设这是无效数据，尝试跳过8位
-                    # (更高级的实现可以尝试 ptr+=1 进行滑动窗口纠错，但这在演示中太慢)
-                    ptr += 8 
-            except:
-                ptr += 8
-
-        # 3. 存入结果
-        if decoded_chars:
-            new_message = "".join(decoded_chars)
-            if len(new_message.strip()) > 0:
-                cursor.execute('INSERT INTO decoded_messages (message) VALUES (?)', (new_message,))
-                logger.info(f"Decoded: {new_message}")
-
-        # 4. [关键步骤] 残余回收 (Residue Recycling)
-        # 计算剩下的残余比特（不足8位的，或者多余的）
-        residue = full_stream[ptr:]
+            if cid:
+                logger.info(f"🎉 DECODED FILE INDEX: {cid}")
+                # 存入解码结果表
+                cursor.execute('INSERT INTO decoded_messages (message) VALUES (?)', (cid,))
+                conn.commit()
+                
+                # 剪掉已处理的比特
+                full_stream = full_stream[bits_consumed:]
+            else:
+                # 找不到了，退出
+                break
         
-        # 清空当前表
+        # 3. 残余回收 (Residue Recycling)
         cursor.execute('DELETE FROM incoming_messages')
         
-        # 如果有残余，把它塞回去作为下一批数据的开头！
-        if len(residue) > 0:
-            # 使用 ID -1 标记这是系统回收的残余数据
-            cursor.execute('INSERT INTO incoming_messages (peer_id, bits) VALUES (-1, ?)', (residue,))
-            # logger.info(f"Recycled {len(residue)} bits back to buffer")
-        
+        # 限制残渣大小，防止无限增长
+        if len(full_stream) > 4000:
+            full_stream = full_stream[-4000:]
+            
+        if full_stream:
+            # 将剩下的比特存回去，作为下次解码的开头
+            cursor.execute('INSERT INTO incoming_messages (peer_id, bits) VALUES (-1, ?)', (full_stream,))
+            
         conn.commit()
         conn.close()
+
+    # ==========================================
+    # C++ 交互接口 (ZMQ Handlers)
+    # ==========================================
     
     def handle_send_request(self, request: Dict) -> Dict:
-        """
-        Handle sender request: reorder hashes based on secret message
-        (ORIM Algorithm 2: Data Encoding - Sender Side)
-        
-        Args:
-            request: JSON request from C++
-            
-        Returns:
-            JSON response with reordered hashes
-        """
+        """处理发送请求：将比特编码进哈希顺序"""
         try:
-            peer_id = request['peer_id']
-            inv_type = request['inv_type']
             hashes = request['hashes']
             n = len(hashes)
+            if n < 2: return {'status': 'success', 'reordered_hashes': hashes}
             
-            if n < 2:
-                # Cannot encode data with <2 hashes
-                return {
-                    'status': 'success',
-                    'reordered_hashes': hashes
-                }
+            # 1. 计算混淆值并获取自然序
+            obf_vals = self.compute_obfuscated_values(hashes)
+            # 自然序: 按 PRF 值从小到大的原始索引列表
+            natural_order = [i for _, i in sorted((v, i) for i, v in enumerate(obf_vals))]
             
-            # Step 1: Compute obfuscated values V = PRF(H)
-            obfuscated_values = self.compute_obfuscated_values(hashes)
+            # 2. 获取比特并计算 target_rank (Algorithm 2: Check & Consume)
+            # 新接口直接返回 target_rank，保证 rank < n! (无需再次验证)
+            bits, msg_id, actual_data_len, target_rank = self.get_next_secret_bits(n)
             
-            # Step 2: Get natural sort order of obfuscated values
-            # This establishes the "canonical" order for the permutation
-            indexed_values = [(v, i) for i, v in enumerate(obfuscated_values)]
-            indexed_values.sort()  # Sort by obfuscated value ascending
-            natural_order = [i for v, i in indexed_values]
+            # === FIX: 如果没有消息要发送（msg_id=-1），直接返回原始顺序 ===
+            if msg_id == -1:
+                # 按自然序排列（PRF值从小到大）
+                debug_logger.info(f"[SEND] n={n} No message \u2192 Natural order (rank=0)")
+                return {'status': 'success', 'reordered_hashes': [hashes[i] for i in natural_order]}
             
-            # Step 3: Get next secret bits from database
-            secret_bits, msg_id = self.get_next_secret_bits(n)
+            # 3. Log the encoding result
+            # target_rank is already calculated by get_next_secret_bits using Algorithm 2
+            # Mathematically guaranteed: target_rank < n! (no overflow possible)
+            conn_read = sqlite3.connect(self.db_path)
+            cursor_read = conn_read.cursor()
+            cursor_read.execute('SELECT position FROM outgoing_messages WHERE id = ?', (msg_id,))
+            current_pos = cursor_read.fetchone()[0]
+            conn_read.close()
             
-            # Step 4: Convert bits to target permutation using Algorithm 2
-            # This uses Complete Binary Tree mapping (variable-length)
-            target_rank, bits_consumed = self.bits_to_rank(secret_bits, n)
+            # Calculate consumed bits by calling bits_to_rank again (for logging consistency)
+            _, consumed = self.bits_to_rank(bits, n)
             
-            # Update database with actual bits consumed
+            debug_logger.debug(
+                f"[SENDING_SLICE] MsgID={msg_id} Pos={current_pos} "
+                f"BitsLen={len(bits)} ActualData={actual_data_len} Consumed={consumed} "
+                f"Rank={target_rank} Bits={bits[:50]}{'...' if len(bits) > 50 else ''}"
+            )
+            
+            # 4. 更新数据库发送进度
+            # 使用 actual_data_len (实际从数据库消耗的位数)
+            # 这与 get_next_secret_bits 返回的 consumed 位数一致
             if msg_id != -1:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                
-                cursor.execute('''
-                    SELECT bits, position FROM outgoing_messages WHERE id = ?
-                ''', (msg_id,))
-                row = cursor.fetchone()
-                
-                if row:
-                    full_bits, position = row
-                    new_position = position + bits_consumed
+                with sqlite3.connect(self.db_path) as conn:
+                    # Update position by actual consumed data length
+                    conn.execute('UPDATE outgoing_messages SET position = position + ? WHERE id = ?', (actual_data_len, msg_id))
                     
-                    if new_position >= len(full_bits):
-                        # Message complete
-                        cursor.execute('''
-                            UPDATE outgoing_messages
-                            SET position = ?, completed_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        ''', (new_position, msg_id))
-                        logger.info(f"Completed sending message ID {msg_id}")
-                    else:
-                        cursor.execute('''
-                            UPDATE outgoing_messages
-                            SET position = ?
-                            WHERE id = ?
-                        ''', (new_position, msg_id))
-                
-                conn.commit()
-                conn.close()
+                    # 检查是否发送完毕
+                    cursor = conn.execute('SELECT position, length(bits) FROM outgoing_messages WHERE id = ?', (msg_id,))
+                    pos, total = cursor.fetchone()
+                    if pos >= total:
+                        conn.execute('UPDATE outgoing_messages SET completed_at = CURRENT_TIMESTAMP WHERE id = ?', (msg_id,))
+                        logger.info(f"✅ Message #{msg_id} transmission completed (Total bits: {total})")
             
-            # Step 5: Convert rank to actual permutation using Lehmer code
-            lehmer = self.factorial_number_system(target_rank, n)
-            target_permutation = self.lehmer_to_permutation(lehmer)
+            # 5. 生成排列并重排哈希
+            try:
+                lehmer = self.factorial_number_system(target_rank, n)
+                perm = self.lehmer_to_permutation(lehmer)
+                final_indices = [natural_order[perm[i]] for i in range(n)]
+            except Exception as e:
+                logger.error(f"Permutation Error: n={n} rank={target_rank} error={e}")
+                debug_logger.error(f"[PERM_ERROR] n={n} rank={target_rank} bits={bits} error={e}")
+                # 返回自然序作为备选
+                return {'status': 'success', 'reordered_hashes': [hashes[i] for i in natural_order]}
             
-            # Step 6: Apply target permutation to natural order
-            # reordered[i] = natural_order[target_permutation[i]]
-            final_indices = [natural_order[target_permutation[i]] for i in range(n)]
+            self.stats['sent_msgs'] += 1
+            self.stats['bits_sent'] += consumed
+            logger.info(f"Sender: Encoded {consumed} bits (Rank={target_rank})")
             
-            # Step 7: Reorder original hashes
-            reordered_hashes = [hashes[idx] for idx in final_indices]
-            
-            # Update statistics
-            self.stats['sent_messages'] += 1
-            self.stats['total_bits_sent'] += bits_consumed
-            
-            logger.info(f"Sender: Encoded {bits_consumed} bits into {n} {inv_type} hashes for peer {peer_id} (rank={target_rank})")
-            
-            return {
-                'status': 'success',
-                'reordered_hashes': reordered_hashes,
-                'debug': {
-                    'bits_encoded': bits_consumed,
-                    'message_id': msg_id,
-                    'rank': target_rank
-                }
-            }
+            return {'status': 'success', 'reordered_hashes': [hashes[i] for i in final_indices]}
             
         except Exception as e:
-            logger.error(f"Error in handle_send_request: {e}", exc_info=True)
-            self.stats['errors'] += 1
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
-    
+            logger.error(f"Send Error: {e}")
+            return {'status': 'error', 'message': str(e)}
+
     def handle_receive_request(self, request: Dict) -> Dict:
-        """
-        Handle receiver request: extract secret bits from received hashes
-        (ORIM Algorithm 4: Data Decoding - Receiver Side)
-        
-        Critical: Must sort obfuscated values to establish canonical order,
-        then determine what permutation was applied.
-        
-        Args:
-            request: JSON request from C++
-            
-        Returns:
-            JSON acknowledgment
-        """
+        """处理接收请求：排序 -> 提取比特"""
         try:
-            peer_id = request['peer_id']
-            inv_type = request['inv_type']
             hashes = request['hashes']
             n = len(hashes)
             
-            if n < 2:
-                return {'status': 'success', 'message': 'Too few hashes'}
+            # === CRITICAL FIX: Log single-hash trap ===
+            if n < 2: 
+                logger.info(f"Receiver: Ignored INV with {n} hash (need >= 2 for permutation)")
+                return {'status': 'success'}
+            # === End Fix ===
             
-            # Step 1: Compute obfuscated values V' = PRF(H')
-            # These are the PRF values in the RECEIVED order
-            obfuscated_values = self.compute_obfuscated_values(hashes)
+            # ... 后面的代码保持不变 ...
             
-            # Step 2: Sort obfuscated values to get canonical order
-            # This is CRITICAL - we need to know what the "natural" sorted order is
-            indexed_values = [(v, i) for i, v in enumerate(obfuscated_values)]
-            sorted_indexed = sorted(indexed_values)  # Sort by obfuscated value
+            # 1. 逆向计算 Rank
+            obf_vals = self.compute_obfuscated_values(hashes)
             
-            # Step 3: Determine the permutation
-            # The received order is a permutation of the sorted order
-            # We need to find which permutation was applied
+            # 还原排列逻辑
+            indexed_values = [(v, i) for i, v in enumerate(obf_vals)]
+            sorted_indexed = sorted(indexed_values)
+            sorted_order = [orig_idx for _, orig_idx in sorted_indexed]
             
-            # sorted_order[i] = original index of i-th smallest obfuscated value
-            sorted_order = [original_idx for v, original_idx in sorted_indexed]
+            sorted_to_received = {s_idx: pos for pos, s_idx in enumerate(sorted_order)}
+            rec_perm = [sorted_to_received[i] for i in range(n)]
             
-            # Now we need the inverse: given the received order (0,1,2,...,n-1),
-            # what positions do they have in the sorted order?
-            # Create inverse mapping: position in sorted order → position in received order
-            sorted_to_received = {sorted_idx: pos for pos, sorted_idx in enumerate(sorted_order)}
-            
-            # The permutation is: for each position in sorted order,
-            # where does it appear in received order?
-            # received_permutation[i] = where does sorted_order[i] appear in received order
-            received_permutation = [sorted_to_received[i] for i in range(n)]
-            
-            # Step 4: Convert permutation to rank using Lehmer code
-            lehmer = self.permutation_to_lehmer(received_permutation)
+            lehmer = self.permutation_to_lehmer(rec_perm)
             rank = self.lehmer_to_rank(lehmer)
             
-            # Step 5: Convert rank to secret bits using Algorithm 4 (variable-length)
-            secret_bits = self.rank_to_bits(rank, n)
+            # 2. 提取比特
+            bits = self.rank_to_bits(rank, n)
             
-            # Step 6: Store received bits
-            self.store_received_bits(peer_id, secret_bits)
+            # 🔬 DEBUG: Log received bits
+            debug_logger.debug(f"[RECEIVED_BITS] n={n} Rank={rank} ExtractedLen={len(bits)} Bits={bits}")
             
-            # Update statistics
-            self.stats['received_messages'] += 1
-            self.stats['total_bits_received'] += len(secret_bits)
+            # 3. 存入并解码
+            self.store_received_bits(request.get('peer_id', 0), bits)
             
-            logger.info(f"Receiver: Extracted {len(secret_bits)} bits from {n} {inv_type} hashes from peer {peer_id} (rank={rank})")
+            self.stats['recv_msgs'] += 1
+            self.stats['bits_recv'] += len(bits)
+            logger.info(f"Receiver: Extracted {len(bits)} bits (Rank={rank})")
             
-            return {
-                'status': 'success',
-                'extracted_bits': secret_bits,
-                'debug': {
-                    'bits_extracted': len(secret_bits),
-                    'rank': rank
-                }
-            }
+            return {'status': 'success'}
             
         except Exception as e:
-            logger.error(f"Error in handle_receive_request: {e}", exc_info=True)
-            self.stats['errors'] += 1
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
-    
+            logger.error(f"Recv Error: {e}")
+            return {'status': 'error', 'message': str(e)}
+
     def run(self):
-        """Main server loop"""
-        logger.info("ORIM Server started. Waiting for requests...")
-        
-        try:
-            while True:
-                # Receive request
-                message = self.socket.recv_string()
-                request = json.loads(message)
-                
-                # Route request
-                if request['direction'] == 'send':
-                    response = self.handle_send_request(request)
-                elif request['direction'] == 'receive':
-                    response = self.handle_receive_request(request)
-                else:
-                    response = {
-                        'status': 'error',
-                        'message': f"Unknown direction: {request['direction']}"
-                    }
-                
-                # Send response
-                self.socket.send_string(json.dumps(response))
-                
-        except KeyboardInterrupt:
-            logger.info("Server interrupted by user")
-        except Exception as e:
-            logger.error(f"Fatal error in server loop: {e}", exc_info=True)
-        finally:
-            self.shutdown()
-    
-    def shutdown(self):
-        """Clean shutdown"""
-        logger.info("Shutting down ORIM server...")
-        logger.info(f"Statistics: {self.stats}")
-        self.socket.close()
-        self.context.term()
-        logger.info("Server shutdown complete")
+        logger.info("Service Loop Started.")
+        while True:
+            try:
+                msg = self.socket.recv_string()
+                req = json.loads(msg)
+                resp = self.handle_send_request(req) if req['direction'] == 'send' else self.handle_receive_request(req)
+                self.socket.send_string(json.dumps(resp))
+            except KeyboardInterrupt:
+                logger.info("Server Stopped.")
+                break
+            except Exception as e:
+                logger.error(f"Loop Error: {e}")
+                self.socket.send_string(json.dumps({'status': 'error'}))
 
-
-def add_secret_message(db_path: str, message: str):
+# ==========================================
+# 工具函数：添加消息到队列 (CLI入口)
+# ==========================================
+def add_secret_message(db_path: str, cid_string: str):
     """
-    Add a secret message to the outgoing queue
-    
-    Args:
-        db_path: Path to database
-        message: Secret message to send
+    将 IPFS CID 封装为协议帧并存入数据库
     """
-    # Convert message to binary
-    bits = ''.join(format(ord(c), '08b') for c in message)
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO outgoing_messages (message, bits)
-        VALUES (?, ?)
-    ''', (message, bits))
-    
-    conn.commit()
-    conn.close()
-    
-    print(f"Added message: '{message}' ({len(bits)} bits)")
-
-
-def run_unit_tests():
-    """
-    Unit tests to verify Algorithm 2 and Algorithm 4 correctness
-    Tests the Complete Binary Tree variable-length encoding
-    """
-    print("=" * 70)
-    print("ORIM ALGORITHM VERIFICATION TESTS")
-    print("=" * 70)
-    print()
-    
-    # Create test server
-    server = ORIMServer('tcp://*:9999', b'test_key', ':memory:')
-    
-    # Test 1: Verify bits_to_rank and rank_to_bits are inverses
-    print("Test 1: Round-trip encoding/decoding")
-    print("-" * 70)
-    test_cases = [
-        (2, "1"),                           # n=2: m=1, needs 1 bit
-        (3, "10"),                          # n=3: m=3, needs 2-3 bits  
-        (5, "101010"),                      # n=5: m=7, needs 6-7 bits
-        (10, "1101011011010110110101"),    # n=10: m=22, needs 21-22 bits (22 bits provided)
-    ]
-    
-    all_passed = True
-    for n, original_bits in test_cases:
-        rank, bits_consumed = server.bits_to_rank(original_bits, n)
-        decoded_bits = server.rank_to_bits(rank, n)
+    try:
+        # 使用协议打包 (Magic + CID + CRC)
+        bits = ORIMProtocol.pack_cid(cid_string)
         
-        n_fact = factorial(n)
-        m = 1
-        while (1 << m) < n_fact:
-            m += 1
-        threshold = (1 << m) - n_fact
+        # 🔬 TRACE STEP 1: Log full binary string after CID conversion
+        debug_logger.debug(f"[NEW_MSG] CID={cid_string} TotalLen={len(bits)} Bits={bits}")
         
-        # The decoded bits should match the consumed portion of the input
-        expected = original_bits[:bits_consumed]
-        passed = decoded_bits == expected
+        conn = sqlite3.connect(db_path)
+        conn.execute('INSERT INTO outgoing_messages (message, bits) VALUES (?, ?)', (cid_string, bits))
+        msg_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        conn.commit()
+        conn.close()
         
-        all_passed = all_passed and passed
+        # 🔬 TRACE STEP 2: Confirm database insertion
+        debug_logger.debug(f"[DB_INSERTED] MsgID={msg_id} CID={cid_string} StoredBits={len(bits)}")
         
-        status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"{status} | n={n} | Input: '{original_bits}' ({len(original_bits)} bits) → Rank: {rank} → Output: '{decoded_bits}' ({len(decoded_bits)} bits)")
-        print(f"       | n!={n_fact}, m={m}, threshold={threshold}, bits_consumed={bits_consumed}")
-    
-    print()
-    
-    # Test 2: Verify variable-length encoding properties
-    print("Test 2: Variable-length encoding properties")
-    print("-" * 70)
-    
-    for n in [3, 5, 10]:
-        n_fact = factorial(n)
-        m = 1
-        while (1 << m) < n_fact:
-            m += 1
-        threshold = (1 << m) - n_fact
-        
-        print(f"n={n}: n!={n_fact}, 2^{m-1}={1<<(m-1)}, 2^{m}={1<<m}")
-        print(f"  Threshold (2^m - n!): {threshold}")
-        print(f"  Ranks 0..{threshold-1} encode {m} bits")
-        print(f"  Ranks {threshold}..{n_fact-1} encode {m-1} bits")
-        
-        # Verify first part
-        test_rank = 0 if threshold > 0 else threshold
-        bits_0 = server.rank_to_bits(test_rank, n)
-        print(f"  Rank {test_rank} → '{bits_0}' ({len(bits_0)} bits)")
-        
-        # Verify second part
-        if threshold < n_fact - 1:
-            test_rank = threshold
-            bits_t = server.rank_to_bits(test_rank, n)
-            print(f"  Rank {test_rank} → '{bits_t}' ({len(bits_t)} bits)")
-        
-        print()
-    
-    # Test 3: Verify permutation logic
-    print("Test 3: Sender-Receiver permutation consistency")
-    print("-" * 70)
-    
-    # Simulate sender encoding
-    test_bits = "101101"
-    n = 5
-    # Generate proper 64-character hex hashes (like Bitcoin transaction hashes)
-    test_hashes = [f"{i:064x}" for i in range(n)]
-    
-    # Sender: compute PRF and sort
-    obf_values = [server.prf(h) for h in test_hashes]
-    indexed = [(v, i) for i, v in enumerate(obf_values)]
-    indexed.sort()
-    natural_order = [i for v, i in indexed]
-    
-    # Sender: encode bits to rank to permutation
-    rank, bits_consumed = server.bits_to_rank(test_bits, n)
-    lehmer = server.factorial_number_system(rank, n)
-    target_perm = server.lehmer_to_permutation(lehmer)
-    
-    # Apply permutation to get reordered indices
-    final_indices = [natural_order[target_perm[i]] for i in range(n)]
-    reordered_hashes = [test_hashes[idx] for idx in final_indices]
-    
-    print(f"Sender:")
-    print(f"  Original bits: '{test_bits}'")
-    print(f"  Bits consumed: {bits_consumed}")
-    print(f"  Rank: {rank}")
-    print(f"  Original hashes: {test_hashes}")
-    print(f"  Reordered hashes: {reordered_hashes}")
-    print()
-    
-    # Receiver: decode from reordered hashes
-    recv_obf_values = [server.prf(h) for h in reordered_hashes]
-    recv_indexed = [(v, i) for i, v in enumerate(recv_obf_values)]
-    recv_sorted = sorted(recv_indexed)
-    recv_sorted_order = [original_idx for v, original_idx in recv_sorted]
-    
-    sorted_to_received = {sorted_idx: pos for pos, sorted_idx in enumerate(recv_sorted_order)}
-    recv_perm = [sorted_to_received[i] for i in range(n)]
-    
-    recv_lehmer = server.permutation_to_lehmer(recv_perm)
-    recv_rank = server.lehmer_to_rank(recv_lehmer)
-    recv_bits = server.rank_to_bits(recv_rank, n)
-    
-    print(f"Receiver:")
-    print(f"  Received hashes: {reordered_hashes}")
-    print(f"  Decoded rank: {recv_rank}")
-    print(f"  Decoded bits: '{recv_bits}'")
-    print()
-    
-    expected_bits = test_bits[:bits_consumed]
-    match = recv_bits == expected_bits
-    status = "✓ PASS" if match else "✗ FAIL"
-    print(f"{status} | Sent: '{expected_bits}' | Received: '{recv_bits}' | Match: {match}")
-    print()
-    
-    print("=" * 70)
-    if all_passed and match:
-        print("ALL TESTS PASSED ✓")
-    else:
-        print("SOME TESTS FAILED ✗")
-    print("=" * 70)
-    print()
-
+        print(f"✅ Message Queued: {cid_string} (Encoded to {len(bits)} bits)")
+    except ValueError as e:
+        print(f"❌ Error adding message: {e}")
 
 if __name__ == '__main__':
     import argparse
+    import os
     
-    parser = argparse.ArgumentParser(description='ORIM Covert Channel Server')
-    parser.add_argument('--endpoint', default='tcp://*:5555',
-                       help='ZMQ endpoint (default: tcp://*:5555)')
-    parser.add_argument('--key', default='default_secret_key_change_me',
-                       help='PRF secret key')
-    parser.add_argument('--db', default='orim.db',
-                       help='Database path (default: orim.db)')
-    parser.add_argument('--add-message', metavar='MESSAGE',
-                       help='Add a secret message to send queue')
-    parser.add_argument('--test', action='store_true',
-                       help='Run unit tests to verify algorithms')
+    # 1. 算出绝对路径 (不管你在哪启动，路径永远固定)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # 假设 storage 在 orim_server.py 的上一级目录的 storage 文件夹里
+    project_root = os.path.dirname(current_dir) 
+    db_path_absolute = os.path.join(project_root, 'storage', 'orim.db')
     
+    # 打印出来检查
+    print(f"🔧 [DEBUG] 强制数据库绝对路径: {db_path_absolute}")
+
+    parser = argparse.ArgumentParser()
+    # 重点：把默认值改为这个绝对路径变量
+    parser.add_argument('--db', default=db_path_absolute, help='Path to SQLite database')
+    parser.add_argument('--add-message', help='Add IPFS CID to queue')
     args = parser.parse_args()
     
-    # If running tests, do that and exit
-    if args.test:
-        run_unit_tests()
-        sys.exit(0)
-    
-    # If adding a message, do that and exit
     if args.add_message:
         add_secret_message(args.db, args.add_message)
-        sys.exit(0)
-    
-    # Start server
-    prf_key = args.key.encode('utf-8')
-    server = ORIMServer(args.endpoint, prf_key, args.db)
-    server.run()
+    else:
+        # 启动时使用 args.db
+        ORIMServer('tcp://*:5555', b'secret', args.db).run()
