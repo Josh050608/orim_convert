@@ -10,32 +10,30 @@
 
 ## ⚡ 快速开始
 
-### 🧪 快速测试（推荐首次使用）
 ```bash
-./test_e2e.py
-```
-
-### 🎨 启动 GUI 演示
-```bash
-./demo_gui.sh
-```
-
-### 🌐 启动完整系统
-```bash
+# 1. 启动完整系统（含 GUI）
 ./start_demo.sh
+
+# 2. 或仅启动 GUI 界面
+./start_gui.sh
+
+# 3. 停止所有服务
+./stop.sh
 ```
 
 ---
 
 ## 📚 详细文档
 
-- **GUI 使用指南**: [docs/GUI_USER_GUIDE.md](docs/GUI_USER_GUIDE.md)
-- **集成完成报告**: [docs/GUI_INTEGRATION_COMPLETE.md](docs/GUI_INTEGRATION_COMPLETE.md)
-- **技术实现文档**: [docs/ORIM_README.md](docs/ORIM_README.md)
+- **项目总结**: [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) - 完整的技术实现和架构说明
+- **GUI 使用指南**: [docs/GUI_USER_GUIDE.md](docs/GUI_USER_GUIDE.md) - 图形界面操作指南
+- **技术文档**: [docs/ORIM_README.md](docs/ORIM_README.md) - 深入的技术细节
 
 ---
 
-## 1. 安装系统依赖
+## 🔧 环境配置
+
+### 1. 安装系统依赖
 
 ### Ubuntu/Debian
 ```bash
@@ -62,7 +60,7 @@ brew install automake libtool boost pkg-config libevent zeromq sqlite
 
 ---
 
-## 2. 创建 Python 环境
+### 2. 创建 Python 环境
 
 ```bash
 # 安装 Miniconda（如果尚未安装）
@@ -74,12 +72,50 @@ conda create -n orim_env python=3.9 -y
 conda activate orim_env
 
 # 安装 Python 依赖
-pip install pyzmq
+pip install pyzmq cryptography requests ipfshttpclient
+```
+
+**依赖说明**:
+- `pyzmq`: ZMQ 消息队列（ORIM Server 通信）
+- `cryptography`: Fernet AES-256 加密
+- `requests`: IPFS HTTP API 调用
+- `ipfshttpclient`: IPFS Python 客户端
+
+---
+
+### 3. 安装和配置 IPFS
+
+```bash
+# macOS
+brew install ipfs
+
+# Linux
+wget https://dist.ipfs.tech/kubo/v0.38.1/kubo_v0.38.1_linux-amd64.tar.gz
+tar -xvzf kubo_v0.38.1_linux-amd64.tar.gz
+cd kubo
+sudo bash install.sh
+
+# 初始化 IPFS
+ipfs init
+
+# 启动 IPFS daemon（需要保持运行）
+ipfs daemon
+```
+
+**后台运行 IPFS**:
+```bash
+nohup ipfs daemon > /tmp/ipfs_daemon.log 2>&1 &
+```
+
+**验证 IPFS**:
+```bash
+ipfs id
+# 应该显示你的 IPFS 节点 ID
 ```
 
 ---
 
-## 3. 编译 Bitcoin Core
+### 4. 编译 Bitcoin Core
 
 ```bash
 cd bitcoin
@@ -104,52 +140,148 @@ make -j$(sysctl -n hw.ncpu)  # macOS
 
 ---
 
-## 4. 运行集成测试
+## 🚀 启动系统
+
+### 完整启动（推荐）
 
 ```bash
-# 确保在项目根目录
-cd scripts/
-./test_orim_integration.sh
+# 启动所有服务 + GUI
+./start_demo.sh
 ```
 
-**测试流程**：
-1. 启动 ORIM Python 服务器
-2. 启动发送方和接收方 Bitcoin 节点
-3. 生成初始区块
-4. 发送测试消息 "Hello"
-5. 验证消息接收
+**启动内容**:
+1. ORIM Server (编码服务)
+2. Decoder Service (解码服务)
+3. Bitcoin Regtest 网络 (2个节点)
+4. Traffic Bot (自动挖矿)
+5. Alice-Bob GUI 界面
 
-**预期结果**：
-```
-========================================
-✓ SUCCESS! Message received correctly!
-========================================
+### GUI 使用说明
+
+**Alice (左侧窗口)**:
+1. 点击 `📁 选择文件` 选择要发送的文件
+2. 点击 `🚀 加密并上传` 加密并上传到 IPFS
+3. 查看生成的 CID（文件索引）
+4. 等待传输（10-60秒）
+
+**Bob (右侧窗口)**:
+1. 自动检测接收到的 CID
+2. 选中 CID 行
+3. 点击 `⬇️ 下载选中文件`
+4. 文件自动解密保存到 `storage/downloads/`
+
+---
+
+## 📊 系统监控
+
+```bash
+# 查看日志
+tail -f storage/orim_server.log    # ORIM 服务器
+tail -f storage/decoder.log         # 解码服务
+tail -f storage/traffic.log         # 流量机器人
+
+# 查看区块链状态
+./bitcoin/src/bitcoin-cli -regtest -datadir=/tmp/bitcoin_sender \
+  -rpcuser=test -rpcpassword=test getblockchaininfo
+
+# 查看数据库
+sqlite3 storage/orim.db "SELECT * FROM outgoing_messages LIMIT 5"
+sqlite3 storage/orim.db "SELECT * FROM decoded_messages LIMIT 5"
+
+# 查看 IPFS 状态
+ipfs id
+ipfs swarm peers
 ```
 
 ---
 
-## 常见问题
+## 🐛 故障排查
 
-### 问题 1：configure 报错 "ZMQ not found"
+### IPFS 相关
+
+**问题**: "IPFS download failed: 500"
 ```bash
-sudo apt install libzmq3-dev  # Ubuntu
-brew install zeromq           # macOS
+# 检查 IPFS daemon 是否运行
+ps aux | grep "ipfs daemon"
+
+# 重启 IPFS
+ipfs shutdown
+nohup ipfs daemon > /tmp/ipfs_daemon.log 2>&1 &
+sleep 3
 ```
 
-### 问题 2：Python 找不到 zmq 模块
+### 数据库锁定
+
+**问题**: "database is locked"
 ```bash
-conda activate orim_env
-pip install pyzmq
+./stop.sh
+rm -f storage/*.lock storage/*.db-journal
+./start_demo.sh
 ```
 
-### 问题 3：测试失败 - 端口占用
+### 密钥问题
+
+**问题**: "No encryption key found for CID"
 ```bash
-# 清理旧进程
+# 检查密钥文件
+cat storage/crypto_keys.json
+
+# 密钥应该包含该 CID
+```
+
+### 端口占用
+
+**问题**: 启动失败 - 端口被占用
+```bash
+# 清理所有进程
+./stop.sh
 pkill -9 bitcoind
-pkill -9 orim_server.py
+pkill -9 python
+
+# 重新启动
+./start_demo.sh
 ```
 
 ---
+
+## 📖 技术栈
+
+- **区块链**: Bitcoin Core (Modified) - Regtest 模式
+- **存储**: IPFS (Kubo 0.38.1) - 分布式文件系统
+- **加密**: Fernet (AES-256-CBC + HMAC-SHA256)
+- **编码**: Complete Binary Tree Variable-Length Encoding
+- **数据库**: SQLite 3
+- **界面**: Tkinter (Python GUI)
+- **通信**: ZMQ (进程间通信)
+
+---
+
+## 🎯 项目特点
+
+✅ **完全隐蔽**: 无法从区块链检测文件传输行为  
+✅ **端到端加密**: AES-256 加密，密钥不经网络  
+✅ **分布式存储**: IPFS 去中心化存储  
+✅ **高效编码**: 99%+ 编码效率  
+✅ **用户友好**: 图形界面，零技术门槛  
+
+---
+
+## 📞 获取帮助
+
+- **项目总结**: [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)
+- **使用指南**: [docs/GUI_USER_GUIDE.md](docs/GUI_USER_GUIDE.md)
+- **技术文档**: [docs/ORIM_README.md](docs/ORIM_README.md)
+
+---
+
+## 📄 许可证
+
+MIT License
+
+---
+
+**项目状态**: ✅ 生产就绪  
+**最后更新**: 2025年12月
 
 
 

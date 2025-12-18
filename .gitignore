@@ -51,6 +51,25 @@ signet/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# ORIM Runtime
+storage/*.log
+storage/*.db-journal
+storage/*.db-shm
+storage/*.db-wal
+storage/downloads/*
+!storage/downloads/.gitkeep
+storage/crypto_keys.json
+
+# Test files
+test_*.py
+*_test.py
+test_examples/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
 *.so
 .Python
 env/
