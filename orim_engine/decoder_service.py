@@ -11,12 +11,7 @@ import logging
 import os
 
 # 引入协议层
-try:
-    from core.protocol import ORIMProtocol
-except ImportError:
-    # 允许在 orim_engine 目录下直接运行
-    sys.path.append(os.getcwd())
-    from core.protocol import ORIMProtocol
+from protocol import ORIMProtocol
 
 # 配置日志
 logging.basicConfig(

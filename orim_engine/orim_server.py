@@ -21,13 +21,8 @@ from typing import List, Tuple, Dict, Optional
 from datetime import datetime
 
 # === 引入协议封装 ===
-# 尝试从 core 包导入，如果失败尝试直接导入(兼容性处理)
-try:
-    from core.protocol import ORIMProtocol
-except ImportError:
-    # 允许在 orim_engine 目录下直接运行
-    sys.path.append(os.getcwd())
-    from core.protocol import ORIMProtocol
+# 直接从 orim_engine 包导入
+from protocol import ORIMProtocol
 
 # 配置日志 (这是 Server 运行日志)
 logging.basicConfig(

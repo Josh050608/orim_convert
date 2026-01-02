@@ -15,10 +15,11 @@ import signal
 SENDER_DIR = "/tmp/bitcoin_sender"
 RPC_USER = "test"
 RPC_PASSWORD = "test"
-MIN_BATCH = 15
-MAX_BATCH = 40
-SLEEP_MIN = 1.0
-SLEEP_MAX = 3.0
+MIN_BATCH = 20
+MAX_BATCH = 60
+SLEEP_MIN = 0.3
+SLEEP_MAX = 0.8
+BLOCKS_PER_MINE = 2  # Mine 2 blocks per cycle for faster confirmation
 
 class TrafficBot:
     def __init__(self):
@@ -68,9 +69,9 @@ class TrafficBot:
                 success_count += 1
         return success_count
     
-    def mine_block(self, address):
-        """Mine exactly 1 block to clear mempool and broadcast INV"""
-        result = self.run_cli(["generatetoaddress", "1", address])
+    def mine_blocks(self, address, count=1):
+        """Mine blocks to clear mempool and broadcast INV"""
+        result = self.run_cli(["generatetoaddress", str(count), address])
         return result is not None
     
     def run(self):
@@ -99,11 +100,11 @@ class TrafficBot:
                 sent = self.send_transaction_batch(address, batch_size)
                 self.total_txs += sent
                 
-                # Step B: CRITICAL - Mine block to force broadcast
+                # Step B: CRITICAL - Mine blocks to force broadcast
                 # Without this, mempool fills up and receiver stops getting INV messages
-                if self.mine_block(address):
-                    self.total_blocks += 1
-                    print(f"[Traffic Bot] Loop #{loop_count}: Sent {sent}/{batch_size} txs, Mined 1 block (Total: {self.total_txs} txs, {self.total_blocks} blocks)")
+                if self.mine_blocks(address, BLOCKS_PER_MINE):
+                    self.total_blocks += BLOCKS_PER_MINE
+                    print(f"[Traffic Bot] Loop #{loop_count}: Sent {sent}/{batch_size} txs, Mined {BLOCKS_PER_MINE} blocks (Total: {self.total_txs} txs, {self.total_blocks} blocks)")
                 else:
                     print(f"[Traffic Bot] Loop #{loop_count}: Sent {sent}/{batch_size} txs, MINING FAILED")
                 

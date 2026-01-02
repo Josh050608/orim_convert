@@ -182,9 +182,6 @@ target/
 *.rar
 *.7z
 
-# Core dumps
-core
-core.*
 
 # 密钥和敏感信息
 *.key

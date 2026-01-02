@@ -23,11 +23,7 @@ from pathlib import Path
 from ipfs_crypto_service import IPFSCryptoService
 
 # 引入 ORIM 协议
-try:
-    from core.protocol import ORIMProtocol
-except ImportError:
-    sys.path.append(os.getcwd())
-    from core.protocol import ORIMProtocol
+from protocol import ORIMProtocol
 
 logger = logging.getLogger(__name__)
 

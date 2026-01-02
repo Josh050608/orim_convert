@@ -8,15 +8,9 @@ import os
 import sys
 
 # 引入协议层和文件服务
-try:
-    from core.protocol import ORIMProtocol
-    from file_sender import ORIMFileSender
-    from file_receiver import ORIMFileReceiver
-except ImportError:
-    sys.path.append(os.getcwd())
-    from core.protocol import ORIMProtocol
-    from file_sender import ORIMFileSender
-    from file_receiver import ORIMFileReceiver
+from protocol import ORIMProtocol
+from file_sender import ORIMFileSender
+from file_receiver import ORIMFileReceiver
 
 class ORIMGUI:
     def __init__(self, root, db_path="orim.db"):
